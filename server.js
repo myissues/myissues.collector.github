@@ -88,34 +88,103 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
 						});
 		            }
 
+            		function syncIssueForNumber(number, callback) {
+			            return callGithub(userInfo, "/repos/" + owner.name + "/" + repo.name + "/issues/" + number, function(err, res, issue) {
+			                if (err) return callback(err);
+							return syncIssue(issue, callback);
+			            });
+            		}
+
+					function syncIssue(issue, callback) {
+						return issuesTable.insert({
+	                		id: "github.com/" + owner.name + "/" + repo.name + "/issue/" + issue.id,
+	                		repository: "github.com/" + owner.name + "/" + repo.name,
+	                		externalUrl: issue.html_url,
+	                		title: issue.title,
+	                		state: issue.state,
+							createdOn: new Date(issue.created_at).getTime(),
+							updatedOn: new Date(issue.updated_at).getTime(),
+							createdBy: "github.com/" + issue.user.login,
+							assignedTo: (issue.assignee && issue.assignee.login && ("github.com/" + issue.assignee.login)) || null,
+	                	}, {
+	                        upsert: true
+	                    }).run(r.conn, function (err, issueResult) {
+	                        if (err) return callback(err);
+
+	                        return syncIssueComments(issue.id, issue.comments_url, function(err) {
+		                        if (err) return callback(err);
+
+		                        return syncIssueEvents(issue.id, issue.events_url, function(err) {
+			                        if (err) return callback(err);
+
+			                        return callback(null, issueResult);
+		                        });
+	                        });
+	                    });
+					}
+
+					function syncIssueComments(issueId, url, callback) {
+			            return callGithub(userInfo, url, function(err, res, comments) {
+			                if (err) return callback(err);
+			                if (!comments || comments.length === 0) {
+			                	return callback(null);
+			                }
+							return r.tableEnsure(DB_NAME, "myissues", "comments", function(err, commentsTable) {
+					            if (err) return callback(err);
+				                return commentsTable.insert(comments.map(function (comment) {
+				                	return {
+				                		id: "github.com/" + owner.name + "/" + repo.name + "/issue/" + issueId + "/comment/" + comment.id,
+				                		repository: "github.com/" + owner.name + "/" + repo.name,
+				                		issue: "github.com/" + owner.name + "/" + repo.name + "/issue/" + issueId,
+				                		body: comment.body,
+										createdOn: new Date(comment.created_at).getTime(),
+										updatedOn: new Date(comment.updated_at).getTime(),
+										createdBy: "github.com/" + comment.user.login
+				                	};
+			                	}), {
+			                        upsert: true
+			                    }).run(r.conn, function (err, result) {
+						            if (err) return callback(err);
+
+					                // TODO: Flag removed comments as removed but keep on our side.
+
+									return callback(null);
+				                });
+							});
+						});
+					}
+
+					function syncIssueEvents(issueId, url, callback) {
+			            return callGithub(userInfo, url, function(err, res, events) {
+			                if (err) return callback(err);
+			                if (!events || events.length === 0) {
+			                	return callback(null);
+			                }
+							return r.tableEnsure(DB_NAME, "myissues", "events", function(err, eventsTable) {
+					            if (err) return callback(err);
+				                return eventsTable.insert(events.map(function (event) {
+				                	return {
+				                		id: "github.com/" + owner.name + "/" + repo.name + "/issue/" + issueId + "/event/" + event.id,
+				                		repository: "github.com/" + owner.name + "/" + repo.name,
+				                		issue: "github.com/" + owner.name + "/" + repo.name + "/issue/" + issueId,
+				                		event: event.event,
+				                		// TODO: Record referenced commits.
+//				                		commit: event.commit_id,
+										createdOn: new Date(event.created_at).getTime(),
+										createdBy: "github.com/" + event.actor.login
+				                	};
+			                	}), {
+			                        upsert: true
+			                    }).run(r.conn, function (err, result) {
+						            if (err) return callback(err);
+									return callback(null);
+				                });
+							});
+						});
+					}
+
 		            return getLastUpdatedTime(function(err, lastUpdated) {
 	            		if (err) return callback(err);
-
-	            		function syncIssueForNumber(number, callback) {
-				            return callGithub(userInfo, "/repos/" + owner.name + "/" + repo.name + "/issues/" + number, function(err, res, issue) {
-				                if (err) return callback(err);
-								return syncIssue(issue, callback);
-				            });
-	            		}
-
-						function syncIssue(issue, callback) {
-							return issuesTable.insert({
-		                		id: "github.com/" + owner.name + "/" + repo.name + "/issue/" + issue.id,
-		                		repository: "github.com/" + owner.name + "/" + repo.name,
-		                		externalUrl: issue.html_url,
-		                		title: issue.title,
-		                		state: issue.state,
-								createdOn: new Date(issue.created_at).getTime(),
-								updatedOn: new Date(issue.updated_at).getTime(),
-								createdBy: "github.com/" + issue.user.login,
-								assignedTo: (issue.assignee && issue.assignee.login && ("github.com/" + issue.assignee.login)) || null,
-		                	}, {
-		                        upsert: true
-		                    }).run(r.conn, function (err, result) {
-		                        if (err) return callback(err);
-		                        return callback(null, result);
-		                    });
-						}
 
 						if (!lastUpdated) {
 							// We have no previous issues to we fetch them all.
@@ -126,6 +195,15 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
 				            	console.log("Calling page:", uri);
 					            return callGithub(userInfo, uri, function(err, res, issues) {
 					                if (err) return callback(err);
+					                if (!issues || issues.length === 0) {
+					                	return callback(null);
+					                }
+					                if (typeof issues === "object") {
+					                	//	Match message 'Issues are disabled for this repo'
+					                	if (/disabled/.test(issues.message)) {
+					                		return callback(null);
+							            }
+					                }
 									var loadNextPage = true;
 					                var waitfor = WAITFOR.serial(function(err) {
 					                	if (err) return callback(err);
@@ -309,6 +387,7 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
         });       
     }
 
+
     function syncActivity(userInfo, r, callback) {
     	if (!config.watch) {
     		console.log("No repositories to watch configured!");
@@ -322,8 +401,8 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
 		            return callGithub(userInfo, "/orgs/" + orgName + "/repos", function(err, res, repos) {
 		                if (err) return callback(err);
 				        var waitfor = WAITFOR.parallel(callback);
-//		                repos.forEach(function(repo) {
-repos.slice(0, 1).forEach(function(repo) {
+		                repos.forEach(function(repo) {
+//repos.slice(0, 1).forEach(function(repo) {
 				        	waitfor(function(callback) {
 								return repositoryTable.insert({
 			                		id: "github.com/" + repo.full_name,
@@ -352,24 +431,105 @@ repos.slice(0, 1).forEach(function(repo) {
 	    });
     }
 
-	app.use(function(req, res, next) {
 
-		if (res.view && res.view.authorized) {
+    var triggerSync = null;
+    var isSyncing = false;
 
-			if (res.view.authorized.github) {
+    function startRegularActivitySync(res) {
 
-				console.log("Trigger activity sync with access token from user:", res.view.authorized.github.username);
-
-				syncActivity(res.view.authorized.github, res.r, function (err) {
-					if (err) {
-						console.error("Error syncing activity", err.stack);
-					}
-					console.log("Sync done");					
-				});
+		triggerSync = function () {
+			if (isSyncing) {
+				console.log("Skip sync trigger. Already syncing.");
+				return;
 			}
+			isSyncing = true;
+			console.log("Trigger activity sync with access token from user:", res.view.authorized.github.username);
+			return syncActivity(res.view.authorized.github, res.r, function (err) {
+				isSyncing = false;
+				if (err) {
+					console.error("Error syncing activity", err.stack);
+				}
+				console.log("Sync done");
+				return;
+	        });
 		}
 
-		return next();
-	});
+		setInterval(function () {
+			return triggerSync();
+		}, 60 * 5 * 1000);
+
+		return triggerSync();
+    }
+
+
+    var credentialsEnsured = false;
+
+    app.get(/\/sync\/now$/, function(req, res, next) {
+        console.log("Sync now triggered!");
+        if (!triggerSync) {
+        	console.log("'triggerSync' not set!");
+        	res.writeHead(500);
+            return res.end("'triggerSync' not set!");
+        }
+        triggerSync();
+        return res.end();
+    });
+
+    app.get(/\/ensure\/credentials$/, function(req, res, next) {
+
+        console.log("Ensure credentials triggered");
+
+        function respond (payload) {
+            payload = JSON.stringify(payload, null, 4);
+            res.writeHead(200, {
+                "Content-Type": "application/json",
+                "Content-Length": payload.length,
+                "Cache-Control": "max-age=15"  // seconds
+            });
+            return res.end(payload);
+        }
+
+        if (credentialsEnsured) {
+            return respond({
+                "$status": 200
+            });
+        }
+
+        if (!res.view || !res.view.authorized) {
+            return respond({
+                "$status": 403,
+                "$statusReason": "No user authorized!"
+            });
+        }
+        if (!res.view.authorized.github) {
+            return respond({
+                "$status": 403,
+                "$statusReason": "No github user authorized!"
+            });
+        }
+
+        console.log("res.view.authorized", JSON.stringify(res.view.authorized, null, 4));
+/*
+        if (
+            res.view.authorized.github.scope.indexOf("write:repo_hook") === -1 ||
+            res.view.authorized.github.scope.indexOf("repo") === -1
+        ) {
+            var scope = "write:repo_hook,repo";
+
+            return respond({
+                "$status": 403,
+                "$statusReason": "Insufficient scope",
+                "requestScope": scope
+            });
+        }
+*/
+        startRegularActivitySync(res);
+
+        credentialsEnsured = true;
+
+        return respond({
+            "$status": 200
+        });
+    });
 
 });
