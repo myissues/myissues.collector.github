@@ -278,6 +278,11 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
 			            return callGithub(userInfo, uri, function(err, res, events) {
 			                if (err) return callback(err);
 
+			                if (!events || events.length === 0) {
+			                	console.log("No events for uri:", uri);
+			                	return callback(null);
+			                }
+
 			                var loadNextPage = true;
 
 			                var waitfor = WAITFOR.serial(function(err) {
