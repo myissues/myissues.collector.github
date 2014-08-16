@@ -78,13 +78,16 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
 		            		repository: "github.com/" + owner.name + "/" + repo.name
 		            	}).limit(1).run(r.conn, function(err, cursor) {
 		            		if (err) return callback(err);
-							if (cursor.hasNext()) {
+//							if (cursor.hasNext()) {
 								return cursor.toArray(function(err, results) {
 								    if (err) return callback(err);
+								    if (results.length === 0) {
+										return callback(null, null);
+								    }
 								    return callback(null, results[0].updatedOn);
 								});
-							}
-							return callback(null, null);
+//							}
+//							return callback(null, null);
 						});
 		            }
 
@@ -244,11 +247,14 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
 		            		)
 						).run(r.conn, function(err, cursor) {
 		            		if (err) return callback(err);
-	            			if (!cursor.hasNext()) {
-								console.log("No changes in issues for:", owner, repo);
-	            				return callback(null);
-	            			}
+//	            			if (!cursor.hasNext()) {
+//								console.log("No changes in issues for:", owner, repo);
+//	            				return callback(null);
+//	            			}
 							return cursor.each(function(err, result) {
+
+console.log("CHANGED ISSUES !!!!", err, result);
+
 							    if (err) return callback(err);
 								console.log("Sync issue '" + result.id + "' after change detected for:", owner, repo);
 							    return syncIssueForNumber(result.issue.number, callback);
@@ -266,7 +272,15 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
 	            		repo: repo.id
 	            	}).limit(1).run(r.conn, function(err, cursor) {
 	            		if (err) return callback(err);
-						return callback(null, cursor.hasNext());	            		
+	            		return cursor.next(function (err, result) {
+							if (err) {
+							    if (err.name === "RqlDriverError" && err.message === "No more rows in the cursor.") {
+							    	return callback(null, false);
+							    }
+								return callback(err);
+							}
+							return callback(null, true);
+	            		});
 	            	});
 	            }
 
