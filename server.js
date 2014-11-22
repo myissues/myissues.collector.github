@@ -99,22 +99,25 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
             		}
 
 					function syncIssue(issue, callback) {
+						console.log("syncIssue() - issue.id", issue.id);
 						return issuesTable.insert({
 	                		id: "github.com/" + owner.name + "/" + repo.name + "/issue/" + issue.id,
 	                		repository: "github.com/" + owner.name + "/" + repo.name,
 	                		externalUrl: issue.html_url,
+	                		number: issue.number,
 	                		title: issue.title,
 	                		state: issue.state,
 							createdOn: new Date(issue.created_at).getTime(),
 							updatedOn: new Date(issue.updated_at).getTime(),
 							createdBy: "github.com/" + issue.user.login,
 							assignedTo: (issue.assignee && issue.assignee.login && ("github.com/" + issue.assignee.login)) || null,
+							body: issue.body
 	                	}, {
 	                        upsert: true
 	                    }).run(r.conn, function (err, issueResult) {
 	                        if (err) return callback(err);
 
-	                        return syncIssueComments(issue.id, issue.comments_url, function(err) {
+	                        return syncIssueComments(issue, issue.comments_url, function(err) {
 		                        if (err) return callback(err);
 
 		                        return syncIssueEvents(issue.id, issue.events_url, function(err) {
@@ -126,9 +129,11 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
 	                    });
 					}
 
-					function syncIssueComments(issueId, url, callback) {
+					function syncIssueComments(issue, url, callback) {
+						console.log("syncIssueComments() - url", url);
 			            return callGithub(userInfo, url, function(err, res, comments) {
 			                if (err) return callback(err);
+							console.log("syncIssueComments()");
 			                if (!comments || comments.length === 0) {
 			                	return callback(null);
 			                }
@@ -136,9 +141,9 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
 					            if (err) return callback(err);
 				                return commentsTable.insert(comments.map(function (comment) {
 				                	return {
-				                		id: "github.com/" + owner.name + "/" + repo.name + "/issue/" + issueId + "/comment/" + comment.id,
+				                		id: "github.com/" + owner.name + "/" + repo.name + "/issue/" + issue.id + "/comment/" + comment.id,
 				                		repository: "github.com/" + owner.name + "/" + repo.name,
-				                		issue: "github.com/" + owner.name + "/" + repo.name + "/issue/" + issueId,
+				                		issue: "github.com/" + owner.name + "/" + repo.name + "/issue/" + issue.id,
 				                		body: comment.body,
 										createdOn: new Date(comment.created_at).getTime(),
 										updatedOn: new Date(comment.updated_at).getTime(),
@@ -151,10 +156,102 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
 
 					                // TODO: Flag removed comments as removed but keep on our side.
 
-									return callback(null);
+			                        return parseIssueComments(issue, comments, callback);
 				                });
 							});
 						});
+					}
+
+					function parseIssueComments(issue, comments, callback) {
+						console.log("parseIssueComments() - issue.id", issue.id);
+
+			            var mentions = [];
+			            var tags = [];
+
+			            [
+			            	{
+			            		rows: [ issue ],
+			            		makeId: function (type, comment, match) {
+									return "github.com/" + owner.name + "/" + repo.name + "/issue/" + issue.id + "/" + type + "/" + match[1];
+ 								}
+			            	},
+			            	{
+			            		rows: comments,
+			            		makeId: function (type, comment, match) {
+									return "github.com/" + owner.name + "/" + repo.name + "/issue/" + issue.id + "/comment/" + comment.id + "/" + type + "/" + match[1];
+			            		}
+			            	}
+			            ].forEach(function (dataset) {
+				            dataset.rows.forEach(function (comment) {
+				            	var match;
+				            	var mentionsRe = /@([a-zA-Z0-9\-_\.]+)/g;
+								while (match = mentionsRe.exec(comment.body)) {
+									mentions.push({
+						                id: dataset.makeId("mention", comment, match),
+				                		repository: "github.com/" + owner.name + "/" + repo.name,
+				                		issue: "github.com/" + owner.name + "/" + repo.name + "/issue/" + issue.id,
+				                		user: "github.com/" + match[1],
+										createdOn: new Date(comment.created_at).getTime(),
+										updatedOn: new Date(comment.updated_at).getTime(),
+										createdBy: "github.com/" + comment.user.login
+				                	});
+								}
+				            	var tagsRe = /(?:\r?\n|^)\$([a-zA-Z0-9\-_\.]+)[\s\t]{1}(.+)(?:\r?\n|$)/gm;
+								while (match = tagsRe.exec(comment.body)) {
+									tags.push({
+						                id: dataset.makeId("tag", comment, match),
+				                		repository: "github.com/" + owner.name + "/" + repo.name,
+				                		issue: "github.com/" + owner.name + "/" + repo.name + "/issue/" + issue.id,
+				                		name: match[1],
+				                		value: match[2],
+										createdOn: new Date(comment.created_at).getTime(),
+										updatedOn: new Date(comment.updated_at).getTime(),
+										createdBy: "github.com/" + comment.user.login
+				                	});
+								}
+				            });
+			            });
+
+			            function insertMentions (callback) {
+			            	if (mentions.length === 0) {
+			            		return callback(null);
+			            	}
+			            	console.log("insertMentions()", mentions.length);
+							return r.tableEnsure(DB_NAME, "myissues", "mentions", function(err, mentionsTable) {
+					            if (err) return callback(err);
+
+				                return mentionsTable.insert(mentions, {
+			                        upsert: true
+			                    }).run(r.conn, function (err, result) {
+						            if (err) return callback(err);
+
+						            return callback(null);
+				                });
+			                });
+			            }
+
+			            function insertTags (callback) {
+			            	if (tags.length === 0) {
+			            		return callback(null);
+			            	}
+			            	console.log("insertTags()", tags.length);
+							return r.tableEnsure(DB_NAME, "myissues", "tags", function(err, tagsTable) {
+					            if (err) return callback(err);
+
+				                return tagsTable.insert(tags, {
+			                        upsert: true
+			                    }).run(r.conn, function (err, result) {
+						            if (err) return callback(err);
+
+						            return callback(null);
+				                });
+					        });
+			            }
+
+			            return insertMentions(function (err) {
+			            	if (err) return callback(err);
+			            	return insertTags(callback);
+			            });
 					}
 
 					function syncIssueEvents(issueId, url, callback) {
@@ -251,14 +348,16 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
 //								console.log("No changes in issues for:", owner, repo);
 //	            				return callback(null);
 //	            			}
-							return cursor.each(function(err, result) {
-
-console.log("CHANGED ISSUES !!!!", err, result);
-
-							    if (err) return callback(err);
-								console.log("Sync issue '" + result.id + "' after change detected for:", owner, repo);
-							    return syncIssueForNumber(result.issue.number, callback);
+							var waitfor = WAITFOR.serial(callback);
+							cursor.each(function(err, result) {
+								waitfor(function (done) {
+//console.log("CHANGED ISSUES !!!!", err, result);
+								    if (err) return done(err);
+									console.log("Sync issue '" + result.id + "' after change detected for:", owner, repo);
+								    return syncIssueForNumber(result.issue.number, done);
+								});
 							});
+							return waitfor();
 		            	});
 	            	});
             	});
@@ -453,6 +552,7 @@ console.log("CHANGED ISSUES !!!!", err, result);
 
     var triggerSync = null;
     var isSyncing = false;
+    var tablesDropped = false;
 
     function startRegularActivitySync(res) {
 
@@ -463,6 +563,9 @@ console.log("CHANGED ISSUES !!!!", err, result);
 			}
 			isSyncing = true;
 			console.log("Trigger activity sync with access token from user:", res.view.authorized.github.username);
+
+console.log("SYNC DATA", "res.view.authorized.github", res.view.authorized.github);
+
 			return syncActivity(res.view.authorized.github, res.r, function (err) {
 				isSyncing = false;
 				if (err) {
@@ -473,11 +576,49 @@ console.log("CHANGED ISSUES !!!!", err, result);
 	        });
 		}
 
+
+		function clearDB (callback) {
+			if (tablesDropped) {
+				return callback(null);
+			}
+			var waitfor = WAITFOR.serial(function (err) {
+				if (err) return callback(err);
+				tablesDropped = true;
+				return callback();
+			});
+			return res.r.db(DB_NAME).tableList().run(res.r.conn, function (err, tables) {
+				if (err) return callback(err);
+
+				tables.forEach(function (table) {
+					if (table.substring(0, "myissues__".length) !== "myissues__") return;
+
+					return waitfor(function (done) {
+						console.log("Dropping table", table);
+						return res.r.db(DB_NAME).tableDrop(table).run(res.r.conn, function (err) {
+					        if (err) return done(err);
+					        return done();
+						});
+					});
+				});
+			});
+			return waitfor();
+		}
+/*
+		clearDB(function (err) {
+			if (err) {
+				console.error(err.stack);
+			}
+			console.log("cleared DB!");
+		});
+*/
+
 		setInterval(function () {
 			return triggerSync();
 		}, 60 * 5 * 1000);
 
-		return triggerSync();
+		setTimeout(function () {
+			return triggerSync();
+		}, 5 * 1000);
     }
 
 
