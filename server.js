@@ -135,7 +135,8 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
 			                if (err) return callback(err);
 							console.log("syncIssueComments()");
 			                if (!comments || comments.length === 0) {
-			                	return callback(null);
+
+		                        return parseIssueComments(issue, null, callback);
 			                }
 							return r.tableEnsure(DB_NAME, "myissues", "comments", function(err, commentsTable) {
 					            if (err) return callback(err);
@@ -162,26 +163,29 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
 						});
 					}
 
-					function parseIssueComments(issue, comments, callback) {
+					function parseIssueComments(issue, _comments, callback) {
 						console.log("parseIssueComments() - issue.id", issue.id);
 
 			            var mentions = [];
 			            var tags = [];
 
-			            [
+			            var comments = [
 			            	{
 			            		rows: [ issue ],
 			            		makeId: function (type, comment, match) {
 									return "github.com/" + owner.name + "/" + repo.name + "/issue/" + issue.id + "/" + type + "/" + match[1];
  								}
-			            	},
-			            	{
-			            		rows: comments,
+			            	}
+			            ];
+			            if (_comments) {
+			            	comments.push({
+			            		rows: _comments,
 			            		makeId: function (type, comment, match) {
 									return "github.com/" + owner.name + "/" + repo.name + "/issue/" + issue.id + "/comment/" + comment.id + "/" + type + "/" + match[1];
 			            		}
-			            	}
-			            ].forEach(function (dataset) {
+			            	});
+			            }
+			            comments.forEach(function (dataset) {
 				            dataset.rows.forEach(function (comment) {
 				            	var match;
 				            	var mentionsRe = /@([a-zA-Z0-9\-_\.]+)/g;
@@ -216,7 +220,7 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
 			            	if (mentions.length === 0) {
 			            		return callback(null);
 			            	}
-			            	console.log("insertMentions()", mentions.length);
+			            	console.log("insertMentions()", mentions);
 							return r.tableEnsure(DB_NAME, "myissues", "mentions", function(err, mentionsTable) {
 					            if (err) return callback(err);
 
@@ -234,7 +238,7 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
 			            	if (tags.length === 0) {
 			            		return callback(null);
 			            	}
-			            	console.log("insertTags()", tags.length);
+			            	console.log("insertTags()", tags);
 							return r.tableEnsure(DB_NAME, "myissues", "tags", function(err, tagsTable) {
 					            if (err) return callback(err);
 
