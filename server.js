@@ -11,18 +11,28 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
     const DB_NAME = "devcomp";
 
     function callGithub(userInfo, path, callback) {
+    	return callGithub2("GET", userInfo, path, null, callback);
+    }
+
+    function callGithub2(method, userInfo, path, data, callback) {
         var url = path;
         if (/^\//.test(url)) {
         	url = "https://api.github.com" + path;
         }
-        return REQUEST({
+        var opts = {
+        	method: method,
             url: url,
             headers: {
                 "User-Agent": "nodejs/request",
                 "Authorization": "token " + userInfo.accessToken
             },
             json: true
-        }, function (err, res, body) {
+        };
+        if (method === "POST" && data) {
+        	opts.body = data;
+        }
+
+        return REQUEST(opts, function (err, res, body) {
             if (err) return callback(err);
             if (res.statusCode === 403 || res.statusCode === 404) {
                 console.error("Got status '" + res.statusCode + "' for url '" + url + "'! This is likely due to NOT HAVING ACCESS to this API call because your OAUTH SCOPE is too narrow! See: https://developer.github.com/v3/oauth/#scopes", res.headers);
@@ -35,6 +45,10 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
                     scope = "read:org";
                 }
 */
+                if (method === "POST" && /^\/repos\/([^\/]+)\/([^\/]+)\/labels$/.test(path)) {
+                    scope = "repo";
+                }
+
                 if (scope) {
                     console.log("We are going to start a new oauth session with the new require scope added ...");
                     var err = new Error("Insufficient privileges. Should start new session with added scope: " + scope);
@@ -510,6 +524,87 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
     }
 
 
+    function ensureLabels (userInfo, repositoryFullName, callback) {
+
+    	if (
+    		!config.ensure ||
+    		!config.ensure.labels
+    	) return callback(null);
+
+        return callGithub(userInfo, "/repos/" + repositoryFullName + "/labels", function(err, res, labels) {
+            if (err) return callback(err);
+
+            var existingLabels = {};
+        	labels.forEach(function (label) {
+        		existingLabels[label.name.toLowerCase()] = label;
+        	});
+
+            var createLabels = {};
+            var updateLabels = {};
+
+            for (var name in config.ensure.labels) {
+            	if (existingLabels[name.toLowerCase()]) {
+            		if (existingLabels[name.toLowerCase()].color === config.ensure.labels[name].color) {
+            			// Label is in sync.
+            		} else {
+            			updateLabels[existingLabels[name.toLowerCase()].name] = {
+            				color: config.ensure.labels[name].color
+            			}
+            		}
+            	} else {
+        			createLabels[name] = {
+        				color: config.ensure.labels[name].color
+        			}       
+             	}
+            }
+
+			function doUpdateLabels (callback) {
+				if (Object.keys(updateLabels).length === 0) return callback(null);
+console.log("updateLabels", updateLabels, "for", repositoryFullName);
+				var waitfor = WAITFOR.serial(callback);
+				for (var name in updateLabels) {
+					waitfor(name, function (name, done) {
+				        return callGithub2("PATCH", userInfo, "/repos/" + repositoryFullName + "/labels/" + name, {
+				        	"name": name,
+				        	"color": updateLabels[name].color
+				        }, function(err, res, result) {
+				        	if (err) return done(err);
+				        	console.log("result", result, "for", repositoryFullName);
+							return done();
+				        });
+					});
+				}
+				return waitfor();
+			}
+
+			function doCreateLabels (callback) {
+				if (Object.keys(createLabels).length === 0) return callback(null);
+console.log("createLabels", createLabels, "for", repositoryFullName);
+				var waitfor = WAITFOR.serial(callback);
+				for (var name in createLabels) {
+					waitfor(name, function (name, done) {
+				        return callGithub2("POST", userInfo, "/repos/" + repositoryFullName + "/labels", {
+				        	"name": name,
+				        	"color": createLabels[name].color
+				        }, function(err, res, result) {
+				        	if (err) return done(err);
+				        	console.log("result", result, "for", repositoryFullName);
+							return done();
+				        });
+					});
+				}
+				return waitfor();
+			}
+
+			return doUpdateLabels(function (err) {
+				if (err) return callback(err);
+				return doCreateLabels(callback);
+			});
+		});
+    }
+
+    var labelsVerified = {};
+
     function syncActivity(userInfo, r, callback) {
     	if (!config.watch) {
     		console.log("No repositories to watch configured!");
@@ -535,6 +630,18 @@ require("io.pinf.server.www").for(module, __dirname, function(app, config) {
 			                        upsert: true
 			                    }).run(r.conn, function (err, result) {
 			                        if (err) return callback(err);
+
+			                        if (!labelsVerified["github.com/" + repo.full_name]) {
+			                        	ensureLabels(userInfo, repo.full_name, function (err) {
+			                        		if (err) {
+			                        			console.error("Error ensuring labels:", err.stack);
+			                        			return;
+			                        		}
+			                        		labelsVerified["github.com/" + repo.full_name] = true;
+			                        		console.log("Ensure labels done!");
+			                        	});
+			                        }
+
 									return syncActivityForRepo(userInfo, r, {
 										id: repo.owner.id,
 										name: repo.owner.login
@@ -687,6 +794,18 @@ console.log("SYNC DATA", "res.view.authorized.github", res.view.authorized.githu
             });
         }
 */
+        if (
+            res.view.authorized.github.scope.indexOf("repo") === -1
+        ) {
+            var scope = "repo";
+
+            return respond({
+                "$status": 403,
+                "$statusReason": "Insufficient scope",
+                "requestScope": scope
+            });
+        }
+
         startRegularActivitySync(res);
 
         credentialsEnsured = true;
